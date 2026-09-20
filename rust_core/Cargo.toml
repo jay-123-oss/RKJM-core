@@ -1,0 +1,17 @@
+[package]
+name = "wave_brain_core"
+version = "0.1.0"
+edition = "2021"
+description = "Unsupervised context learning & symbolic loops for RKMJ-Core"
+authors = ["RKMJ AI Team"]
+
+[lib]
+name = "wave_brain_core"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.20", features = ["extension-module"], optional = true }
+
+[features]
+default = []
+python = ["dep:pyo3"]
