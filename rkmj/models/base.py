@@ -49,6 +49,10 @@ class RKMJBaseModel(nn.Module):
             if isinstance(m, CSALinear):
                 m.pack_weights_for_inference()
 
+    def pack_weights_for_inference(self):
+        """Alias for pack_for_inference."""
+        self.pack_for_inference()
+
     def unpack_weights(self):
         """Unpack all 2-bit weights back into FP32 ternary representation."""
         for m in self.modules():

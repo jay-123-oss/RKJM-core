@@ -69,26 +69,37 @@ class RKMJLlamaForCausalLM(RKMJBaseModel):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: Optional[torch.Tensor] = None,
         targets: Optional[torch.Tensor] = None,
         kv_cache: Optional[KVCache] = None,
         start_pos: int = 0,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Forward pass.
-        input_ids: [B, T]
+        input_ids: [B, T] (optional if inputs_embeds provided)
         targets: optional [B, T]
         kv_cache: optional KVCache instance for O(1) state caching
         start_pos: sequence offset for positional embeddings and causal attention
+        inputs_embeds: optional precomputed embeddings [B, T, D]
         """
-        B, T = input_ids.shape
+        if inputs_embeds is not None:
+            B, T, _ = inputs_embeds.shape
+            tok_emb = inputs_embeds
+            device = inputs_embeds.device
+        elif input_ids is not None:
+            B, T = input_ids.shape
+            tok_emb = self.embed_tokens(input_ids)
+            device = input_ids.device
+        else:
+            raise ValueError("Either input_ids or inputs_embeds must be specified.")
+
         assert start_pos + T <= self.config.max_seq_len, (
             f"Input sequence length {start_pos + T} exceeds max_seq_len {self.config.max_seq_len}"
         )
 
-        tok_emb = self.embed_tokens(input_ids)
         pos_emb = self.embed_positions(
-            torch.arange(start_pos, start_pos + T, device=input_ids.device)
+            torch.arange(start_pos, start_pos + T, device=device)
         )
         hidden_states = tok_emb + pos_emb
 

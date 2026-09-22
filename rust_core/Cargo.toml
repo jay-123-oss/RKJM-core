@@ -2,7 +2,7 @@
 name = "wave_brain_core"
 version = "0.1.0"
 edition = "2021"
-description = "Unsupervised context learning & symbolic loops for RKMJ-Core"
+description = "Bare-Metal Associative Reasoning Engine for RKMJ-Core"
 authors = ["RKMJ AI Team"]
 
 [lib]
@@ -15,3 +15,9 @@ pyo3 = { version = "0.20", features = ["extension-module"], optional = true }
 [features]
 default = []
 python = ["dep:pyo3"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

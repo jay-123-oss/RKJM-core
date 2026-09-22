@@ -37,16 +37,26 @@ class CSALinear(nn.Module):
       - Dynamic Alpha Scaling: Per-channel scale alpha = mean(|W|) to preserve representation power.
     """
 
-    def __init__(self, in_features: int, out_features: int, bias: bool = False):
+    def __init__(self, in_features: int, out_features: int, bias: bool = False, allocate_latent: bool = True):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.num_words = (in_features + 15) // 16
 
         # High-precision latent weight for optimizer updates (STE)
-        self.latent_weight = nn.Parameter(
-            torch.empty(out_features, in_features, dtype=torch.float32)
-        )
+        if allocate_latent:
+            self.latent_weight = nn.Parameter(
+                torch.empty(out_features, in_features, dtype=torch.float32)
+            )
+            self.register_buffer(
+                "w_packed",
+                torch.zeros((out_features, self.num_words), dtype=torch.int32),
+                persistent=True,
+            )
+        else:
+            self.register_parameter("latent_weight", None)
+            self.register_buffer("w_packed", None, persistent=False)
+
         # Dynamic per-channel scale factor alpha
         self.alpha = nn.Parameter(torch.ones(out_features, dtype=torch.float32))
 
@@ -55,21 +65,16 @@ class CSALinear(nn.Module):
         else:
             self.register_parameter("bias", None)
 
-        # Packed buffer for frozen 2-bit inference execution
-        self.register_buffer(
-            "w_packed",
-            torch.zeros((out_features, self.num_words), dtype=torch.int32),
-            persistent=True,
-        )
         self.is_packed = False
 
         self.reset_parameters()
 
     def reset_parameters(self):
         """Initialize latent weights using Kaiming uniform."""
-        nn.init.kaiming_uniform_(self.latent_weight, a=math.sqrt(5))
-        with torch.no_grad():
-            self.alpha.copy_(self.latent_weight.abs().mean(dim=1).clamp(min=1e-5))
+        if self.latent_weight is not None:
+            nn.init.kaiming_uniform_(self.latent_weight, a=math.sqrt(5))
+            with torch.no_grad():
+                self.alpha.copy_(self.latent_weight.abs().mean(dim=1).clamp(min=1e-5))
 
     def update_alpha(self):
         """Synchronize dynamic scale factor alpha to current latent weight magnitude."""
@@ -101,13 +106,27 @@ class CSALinear(nn.Module):
             from rkmj.serialization.packer import unpack_ternary_weights
             return unpack_ternary_weights(self.w_packed, self.in_features)
 
+    def set_dequantized_weights(self, w_ternary: torch.Tensor, alpha: torch.Tensor, dtype: torch.dtype = torch.bfloat16):
+        """Pre-computes dequantized weights W_dequant = W_ternary * alpha for continuous activation inference."""
+        if alpha.dim() == 1:
+            alpha = alpha.unsqueeze(1)
+        self.register_buffer("dequantized_weight", (w_ternary * alpha).to(dtype).contiguous(), persistent=False)
+        self.register_parameter("latent_weight", None)
+        self.register_buffer("w_packed", None, persistent=False)
+        if self.bias is not None:
+            self.bias.data = self.bias.data.to(dtype)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass.
+        - If dequantized_weight buffer is set: executes high-throughput vectorized linear forward.
         - In training (or when requiring grads): executes C++ autograd kernel.
-        - When packed and in eval mode: executes ultra-fast bitwise popcount kernel.
+        - When packed and in eval mode: executes bitwise popcount kernel.
         """
         x = x.contiguous()
+
+        if hasattr(self, "dequantized_weight") and self.dequantized_weight is not None:
+            return F.linear(x, self.dequantized_weight, self.bias)
 
         if self.training or not self.is_packed or x.requires_grad:
             if CPP_ENGINE_AVAILABLE and hasattr(_C, "csa_linear"):
@@ -140,6 +159,36 @@ class CSALinear(nn.Module):
                 if self.bias is not None:
                     y = y + self.bias
                 return y
+
+    def forward_fused_rmsnorm(
+        self,
+        x: torch.Tensor,
+        rmsnorm_weight: torch.Tensor,
+        eps: float = 1e-6
+    ) -> torch.Tensor:
+        """
+        Fused Operator Forward:
+        RMSNorm -> in-L1 activation sign quantization -> 1.58-bit CSA GEMM.
+        Avoids writing intermediate unquantized activations back to DRAM.
+        """
+        if (
+            not self.training
+            and self.is_packed
+            and not x.requires_grad
+            and CPP_ENGINE_AVAILABLE
+            and hasattr(_C, "fused_rmsnorm_csa_forward")
+        ):
+            return _C.fused_rmsnorm_csa_forward(
+                x.contiguous(),
+                rmsnorm_weight.contiguous(),
+                float(eps),
+                self.w_packed,
+                self.alpha,
+                self.bias
+            )
+        # Fallback: compute standard RMSNorm then regular forward
+        norm_x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps) * rmsnorm_weight
+        return self.forward(norm_x)
 
     def extra_repr(self) -> str:
         return (

@@ -26,7 +26,12 @@ class RMSNorm(nn.Module):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self._norm(x.float()).type_as(x) * self.weight
+        orig_dtype = x.dtype
+        x_fp32 = x.float()
+        variance = x_fp32.pow(2).mean(-1, keepdim=True)
+        norm_x = x_fp32 * torch.rsqrt(variance + self.eps)
+        out = norm_x * self.weight.float()
+        return out.to(orig_dtype)
 
     def extra_repr(self) -> str:
         return f"{self.dim}, eps={self.eps}"

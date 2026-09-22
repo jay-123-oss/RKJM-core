@@ -1,5 +1,6 @@
 import os
 import sys
+import platform
 import shutil
 from setuptools import setup, find_packages
 import torch
@@ -8,15 +9,26 @@ from torch.utils.cpp_extension import BuildExtension, CppExtension, CUDAExtensio
 # Detect CUDA availability
 has_cuda = (torch.cuda.is_available() or os.environ.get("FORCE_CUDA", "0") == "1") and shutil.which("nvcc") is not None
 
+arch = platform.machine().lower()
+
 cxx_args = [
     "-std=c++20",
     "-O3",
     "-fopenmp",
-    "-mavx2",
-    "-mbmi2",
     "-fPIC",
     "-Wall",
 ]
+
+if arch in ("x86_64", "amd64"):
+    cxx_args.extend([
+        "-mavx2",
+        "-mfma",
+        "-mbmi2",
+    ])
+elif arch in ("aarch64", "arm64"):
+    cxx_args.extend([
+        "-march=armv8-a+simd",
+    ])
 
 extra_link_args = [
     "-fopenmp",
@@ -24,9 +36,15 @@ extra_link_args = [
 
 sources = [
     "csrc/bindings.cpp",
+    "csrc/allocator.cpp",
+    "csrc/pack.cpp",
+    "csrc/kernels_avx2.cpp",
+    "csrc/scheduler.cpp",
+    "csrc/autograd_ste.cpp",
     "csrc/cpu/csa_linear_cpu.cpp",
     "csrc/cpu/csa_autograd_cpu.cpp",
     "csrc/cuda/bitwise_host.cpp",
+    "csrc/io/mmap_streamer.cpp",
 ]
 
 if has_cuda:
@@ -52,7 +70,7 @@ if has_cuda:
         )
     ]
 else:
-    print("[INFO] Building RKMJ-Core in CPU mode (OpenMP + AVX2/BMI2 hardware acceleration).")
+    print(f"[INFO] Building RKMJ-Core in CPU mode with multi-ISA vectorization on {arch}.")
     ext_modules = [
         CppExtension(
             name="rkmj._C",

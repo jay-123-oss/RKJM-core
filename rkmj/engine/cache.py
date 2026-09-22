@@ -87,9 +87,17 @@ class KVCache:
                 f"Batch size {batch_size} exceeds maximum cache batch size {self.max_batch_size}"
             )
 
-        # In-place copy slice (strict zero-allocation)
-        self.k[layer_idx, :batch_size, :n_kv_heads, pos:end_pos, :].copy_(k_state)
-        self.v[layer_idx, :batch_size, :n_kv_heads, pos:end_pos, :].copy_(v_state)
+        # In-place contiguous memory update via C++ pointer primitive (zero slice allocation)
+        try:
+            from rkmj import _C
+            if hasattr(_C, "kv_cache_update"):
+                _C.kv_cache_update(self.k, self.v, k_state.contiguous(), v_state.contiguous(), layer_idx, pos)
+            else:
+                self.k[layer_idx, :batch_size, :n_kv_heads, pos:end_pos, :].copy_(k_state)
+                self.v[layer_idx, :batch_size, :n_kv_heads, pos:end_pos, :].copy_(v_state)
+        except Exception:
+            self.k[layer_idx, :batch_size, :n_kv_heads, pos:end_pos, :].copy_(k_state)
+            self.v[layer_idx, :batch_size, :n_kv_heads, pos:end_pos, :].copy_(v_state)
 
         # Return views up to end_pos
         return (
